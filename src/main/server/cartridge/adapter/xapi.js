@@ -388,7 +388,13 @@ var xapiStatement = async function (s, accm) {
         await a.setSubject(actorPks[0]);
         await a.setAgent(agentPks[0]);
         a.competency = alignedCompetencies[i].targetUrl;
-        a.framework = alignedCompetencies[i].educationalFramework;
+        // educationalFramework is schema.org Text: newer alignments carry
+        // the framework @id, legacy ones a display name. assertion.framework
+        // must be a framework id (vision/search and bayes match on it), so
+        // only a URI is usable; otherwise leave it unset for the vision
+        // competency->framework backfill to fill.
+        const alignedFramework = alignedCompetencies[i].educationalFramework;
+        a.framework = /^https?:\/\//i.test(alignedFramework) ? alignedFramework : undefined;
         if (alreadyAligned[a.competency + a.framework] == true)
             continue;
         alreadyAligned[a.competency + a.framework] = true;

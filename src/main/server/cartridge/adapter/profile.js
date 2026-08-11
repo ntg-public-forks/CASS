@@ -85,7 +85,7 @@ let profileCalculator = async function () {
         profile = await pool.exec(p);
         if (profile.error == null) {
             // if (process.env.PROFILE_CACHE == "true" || this.params.cache == "true")
-            await global.ephemeral.put(p.cacheKey, profile, new Date().getTime() + (process.env.PROFILE_TTL || 30 * 24 * 60 * 60 * 1000));
+            await global.ephemeral.put(p.cacheKey, profile, new Date().getTime() + (process.env.PROFILE_TTL || 24 * 60 * 60 * 1000));
             delete profileInProgress[p.cacheKey];
             return JSON.stringify(profile);
         }
