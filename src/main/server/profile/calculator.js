@@ -16,6 +16,64 @@ const calculatorVersion = 4;
 // Used to determine when rippling properties are done being computed.
 const hashSortCoerce = hasher({ sort: false, coerce: false });
 const process = require('process');
+const crypto = require('crypto');
+
+/**
+  * Memory-efficient, recursive-resistant object hasher.
+  * @param {Object|Array} obj - The data to hash.
+  * @param {string} algorithm - Hash algorithm (default: sha256).
+  */
+function getPersistentSafeHash(obj, algorithm = 'sha256') {
+    const hash = crypto.createHash(algorithm);
+    const seenIds = new Set();
+    const process = (val) => {
+        // 1. Handle Nulls & Primitives
+        if (val === null) {
+            hash.update('n:null');
+            return;
+        }
+
+        const type = typeof val;
+        if (type !== 'object') {
+            // Prefixing with type prevents collisions between (e.g.) "123" and 123
+            hash.update(`${type}:${val}`);
+            return;
+        }
+
+        // 2. Loop Detection (Relying on 'id' field)
+        if (val.id !== undefined && val.id !== null) {
+            if (seenIds.has(val.id)) {
+                hash.update(`r:${val.id}`); // Stop recursion, record reference
+                return;
+            }
+            seenIds.add(val.id);
+        }
+
+        // 3. Handle Arrays
+        if (Array.isArray(val)) {
+            hash.update('a:[');
+            for (let i = 0; i < val.length; i++) {
+                process(val[i]);
+                hash.update(',');
+            }
+            hash.update(']');
+            return;
+        }
+
+        // 4. Handle Objects (Deterministic Key Sorting)
+        const keys = Object.keys(val).sort();
+        hash.update('o:{');
+        for (const key of keys) {
+            hash.update(`${key}:`);
+            process(val[key]);
+            hash.update('|');
+        }
+        hash.update('}');
+    };
+    
+    process(obj);
+    return hash.digest('hex');
+}
 
 // Globals defined at beginning of profile calculation
 const TRACE_SOURCE = false; // Logs the framework name and entire subject PEM with each console log
@@ -322,7 +380,7 @@ module.exports = class ProfileCalculator {
         let hash;
         do {
             this.log("Iterating.");
-            hash = hashSortCoerce.hash(topLevelVertices);
+            hash = getPersistentSafeHash(topLevelVertices);
 
             // Handle relations between competencies, to determine how the competencies relate to goals
             for (const edge of this.g.edges) {
@@ -334,7 +392,7 @@ module.exports = class ProfileCalculator {
                 for (let coprocessor of coprocessors)
                     coprocessor.postProcessEachVertexRepeating.call(this, vertex, vertices, topLevelVertices, inEdges);
             }
-        } while (hash !== hashSortCoerce.hash(topLevelVertices));
+        } while (hash !== getPersistentSafeHash(topLevelVertices));
 
         this.log(this.g.verticies.length + " vertices processed.");
         let profile = {
@@ -345,12 +403,17 @@ module.exports = class ProfileCalculator {
             coprocessor.postProcessProfileBefore.call(this, profile, vertices, topLevelVertices, inEdges);
 
         // Hides data from outputted profile
-        const pruneNonFrameworkData = (vertex, depth) => {
+        const pruneNonFrameworkData = (vertex, depth, visited) => {
             if (depth == null)
                 depth = 0;
+            if (visited == null)
+                visited = new Set();
+            if (visited.has(vertex.id))
+                return [];
+            visited.add(vertex.id);
             delete vertex.framework;
             for (let i = 0; i < vertex.children.length; i++) {
-                let prune = pruneNonFrameworkData(vertex.children[i], depth + 1);
+                let prune = pruneNonFrameworkData(vertex.children[i], depth + 1, visited);
                 if (prune.length == 0) {
                     vertex.children.splice(i--, 1); // NOSONAR -- This is a method for filtering.
                 }
@@ -406,7 +469,5 @@ const cloneGraph = (g) => {
     g2.frameworks.push(...g.frameworks);
     g2.repo = g.repo;
     g2.eim = g.eim;
-    Object.assign(g2.inEdgeCache, g.inEdgeCache);
-    Object.assign(g2.outEdgeCache, g.outEdgeCache);
     return g2;
 };

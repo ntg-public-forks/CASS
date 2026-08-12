@@ -25,7 +25,7 @@ let postProcessProfileEachElement = function (obj, inEdges, vertices, visited) {
     if (visited == null)
         visited = new Set();
     if (visited.has(obj.id))
-        return;
+        return {};
     visited.add(obj.id);
     // Recur for each child
     for (const child of obj.children) {
