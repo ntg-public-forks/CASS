@@ -45,10 +45,39 @@ let subscription = global.events.database.connected.subscribe(async (connected) 
                 });
         }
 
+        // Ephemeral documents are dehydrated the same way permanent records are:
+        // the object is serialized into a single 'data' string field rather than
+        // being written out as a nested document. Cached profiles are deep
+        // competency trees, so storing them raw lets Elasticsearch's dynamic
+        // mapping create a field per property and quickly exhaust the index's
+        // total-field limit. Dehydrating bounds every ephemeral document to two
+        // fields regardless of the index's mapping state.
+        function dehydrate(obj) {
+            return {
+                data: JSON.stringify(obj),
+                writeMs: new Date().getTime(),
+            };
+        }
+
+        // A document that cannot be rehydrated — such as one written in the raw
+        // form used before dehydration — is reported as a miss rather than an
+        // error, so the caller simply recomputes. The data is ephemeral by
+        // definition, so there is nothing to preserve.
+        function rehydrate(source) {
+            if (source == null) {
+                return source;
+            }
+            try {
+                return JSON.parse(source.data);
+            } catch (e) {
+                return null;
+            }
+        }
+
         global.ephemeral = {
             get: async function (id) {
                 cleanupExpired();
-                return (await httpGet(elasticEndpoint + '/ephemeral/_doc/' + id, 'application/json', elasticHeaders()))["_source"];
+                return rehydrate((await httpGet(elasticEndpoint + '/ephemeral/_doc/' + id, 'application/json', elasticHeaders()))["_source"]);
             },
             gets: async function (ids) {
                 cleanupExpired();
@@ -63,11 +92,11 @@ let subscription = global.events.database.connected.subscribe(async (connected) 
                 docs.push(...ids.map(id => ({ _index: 'ephemeral', _id: id })));
                 
                 let response = await httpPost(mget, elasticEndpoint + '/_mget', 'application/json', false, null, null, true, elasticHeaders());
-                response = response?.docs?.map(x => x._source);
+                response = response?.docs?.map(x => rehydrate(x._source));
                 return response || [];
             },
             put: async function (id, obj, until) {
-                return await httpPut(obj, elasticEndpoint + '/ephemeral/_doc/' + id + '?version=' + until + '&version_type=external', 'application/json', elasticHeaders());
+                return await httpPut(dehydrate(obj), elasticEndpoint + '/ephemeral/_doc/' + id + '?version=' + until + '&version_type=external', 'application/json', elasticHeaders());
             },
             delete: async function (id) {
                 return await httpDelete(obj, elasticEndpoint + '/ephemeral/_doc/' + id, elasticHeaders())
