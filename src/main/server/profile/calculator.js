@@ -468,6 +468,8 @@ const cloneGraph = (g) => {
     Object.assign(g2.dontTryAnyMore, g.dontTryAnyMore);
     g2.frameworks.push(...g.frameworks);
     g2.repo = g.repo;
-    g2.eim = g.eim;
+    g2.eim = g.eim;    
+    Object.assign(g2.inEdgeCache, g.inEdgeCache);
+    Object.assign(g2.outEdgeCache, g.outEdgeCache);
     return g2;
 };

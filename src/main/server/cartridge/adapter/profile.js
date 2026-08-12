@@ -53,9 +53,8 @@ let profileCalculator = async function () {
         lastFlush: lastFlush,
         params: paramsCopy
     };
-
     // Perform caching check and establish cache key
-    p.cacheKey = `${EcRemoteLinkedData.trimVersionFromUrl(frameworkId).split("/").pop()}|${EcPk.fromPem(subject).fingerprint()}|-${query_agent_fingerprint.join('-')}|${EcCrypto.md5(JSON.stringify(p.paramsCopy))}|general`;
+    p.cacheKey = `${EcRemoteLinkedData.trimVersionFromUrl(frameworkId).split("/").pop()}|${EcPk.fromPem(subject).fingerprint()}|-${query_agent_fingerprint.join('-')}|${EcCrypto.md5(JSON.stringify(p.params))}|general`;
     if (this.params.flushCache == "true")
         delete profileInProgress[p.cacheKey];
     else if (process.env.PROFILE_CACHE == "true") {

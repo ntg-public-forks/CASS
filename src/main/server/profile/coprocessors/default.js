@@ -120,7 +120,7 @@ let processAssertions = async function () {
 
         await Promise.map(assertions, async (a) => {
             const dataPromises = [
-                a.getSubject(), a.getAgent(), a.getNegative() | a.negative == true,
+                a.getSubject(), a.getAgent(), a.getNegative(),
                 a.getAssertionDate(), a.getExpirationDate()
             ];
 
