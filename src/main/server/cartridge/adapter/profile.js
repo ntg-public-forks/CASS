@@ -53,7 +53,6 @@ let profileCalculator = async function () {
         lastFlush: lastFlush,
         params: paramsCopy
     };
-
     // Perform caching check and establish cache key
     p.cacheKey = `${EcRemoteLinkedData.trimVersionFromUrl(frameworkId).split("/").pop()}|${EcPk.fromPem(subject).fingerprint()}|-${query_agent_fingerprint.join('-')}|${EcCrypto.md5(JSON.stringify(p.params))}|general`;
     if (this.params.flushCache == "true")
@@ -85,7 +84,7 @@ let profileCalculator = async function () {
         profile = await pool.exec(p);
         if (profile.error == null) {
             // if (process.env.PROFILE_CACHE == "true" || this.params.cache == "true")
-            await global.ephemeral.put(p.cacheKey, profile, new Date().getTime() + (process.env.PROFILE_TTL || 30 * 24 * 60 * 60 * 1000));
+            await global.ephemeral.put(p.cacheKey, profile, new Date().getTime() + (process.env.PROFILE_TTL || 24 * 60 * 60 * 1000));
             delete profileInProgress[p.cacheKey];
             return JSON.stringify(profile);
         }
@@ -105,6 +104,43 @@ let profileCalculator = async function () {
  *     tags:
  *       - Profile
  *     summary: Compute the current state of the learner
+ *     x-mcp-tool-name: get_learner_profile
+ *     x-mcp-description: >
+ *       Use this tool to answer the question "what does this person know?"
+ *       Given a learner and a competency framework, this tool computes a
+ *       complete profile showing which competencies the learner has positive
+ *       evidence for, negative evidence for, or no evidence at all.
+ *       REQUIRED PARAMETERS - frameworkId (the full URL of a CaSS Framework)
+ *       and subject (identifies the learner by email, username, Person URL,
+ *       or PEM public key). Both are mandatory.
+ *       BOUNDARIES - Do NOT use this tool to search for frameworks or
+ *       people. Use search_data first to find the right frameworkId and
+ *       subject values. Do NOT use this tool to record evidence. Use
+ *       record_evidence to create assertions first, then call this tool
+ *       to see the updated profile.
+ *     x-mcp-hints: >
+ *       FINDING INPUTS - To get a frameworkId, call search_data with
+ *       q=@type:Framework and a keyword. To identify a subject, use an
+ *       email address directly, or call search_data to look up a Person
+ *       record.
+ *       SUBJECT FORMATS - The subject parameter accepts: an email address
+ *       (e.g. jane.doe@example.com), a username, a full CaSS Person URL
+ *       (e.g. https://server/api/data/schema.org.Person/uid), or a PEM
+ *       public key.
+ *       RESPONSE STRUCTURE - The response is a tree of competencies. Each
+ *       node contains id (competency URL), name, children (sub-competencies),
+ *       and a state object. Key state fields: hasPositiveEvidence (boolean),
+ *       hasNegativeEvidence (boolean), latestEvidenceIsPositive (true/false/null),
+ *       distinctPositiveSignatures and distinctNegativeSignatures (counts of
+ *       unique authorities), isGoal (boolean).
+ *       CACHING - Profiles may be cached. Set flushCache=true after recording
+ *       new evidence to force recalculation. Set cache=true for faster repeat
+ *       queries when freshness is not critical.
+ *       TYPICAL WORKFLOW - (1) Call search_data to find the framework,
+ *       (2) Identify the person (email or search for a Person record),
+ *       (3) Call get_learner_profile with frameworkId and subject,
+ *       (4) Inspect each competency node's state fields to determine mastery
+ *       and gaps.
  *     description: Computes the current state of the learner given a framework. Returns an object representing the learner's profile, including calculated competency levels.
  *     parameters:
  *       - $ref: '#/components/parameters/frameworkId'
@@ -119,8 +155,55 @@ let profileCalculator = async function () {
  *           application/json:
  *             schema:
  *               type: object
- *               description: Ping response
- *               additionalProperties: false
+ *               description: Learner competency profile tree with evidence state per competency.
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                   description: The framework URL this profile was computed against.
+ *                 children:
+ *                   type: array
+ *                   description: Top-level competencies in the framework hierarchy.
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         description: The competency URL.
+ *                       name:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       children:
+ *                         type: array
+ *                         description: Sub-competencies (recursive tree structure).
+ *                         items:
+ *                           type: object
+ *                       state:
+ *                         type: object
+ *                         description: Evidence summary for this competency.
+ *                         properties:
+ *                           hasPositiveEvidence:
+ *                             type: boolean
+ *                           hasNegativeEvidence:
+ *                             type: boolean
+ *                           latestEvidenceIsPositive:
+ *                             type: boolean
+ *                             nullable: true
+ *                           hasAnyChildrenWithPositiveEvidence:
+ *                             type: boolean
+ *                           distinctPositiveSignatures:
+ *                             type: integer
+ *                           distinctNegativeSignatures:
+ *                             type: integer
+ *                           isGoal:
+ *                             type: boolean
+ *                           isHighPriorityGoal:
+ *                             type: boolean
+ *                 msSpeed:
+ *                   type: integer
+ *                   description: Milliseconds taken to compute the profile.
+ *       400:
+ *         description: Missing required parameters or server not acting on behalf of a user.
  */
 
 let lastFlush = Date.now();

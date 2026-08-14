@@ -35,9 +35,9 @@ const cassVersion = require('../../../../package.json').version;
 const pingWithTime = function () {
     if (this.ctx?.req?.eim?.ids)
         global.events.person.doPing(this.ctx?.req?.eim?.ids.map((identity) => identity.ppk.toPem()));
-    return JSON.stringify({
+    const full = {
         ping: 'pong',
-        version: cassVersion,
+        version: process.env.VERSION || cassVersion,
         time: new Date().getTime(),
         ssoViaP1: this.ctx.req.p1 ? true : null,
         ssoPublicKey: this.ctx.req.eim ? this.ctx.req.eim.ids[0].ppk.toPk().toPem() : undefined,
@@ -59,7 +59,24 @@ const pingWithTime = function () {
         postMaxSize: global.postMaxSize,
         signatureSheetHashAlgorithm: 'SHA-256',
         fips: realCrypto.getFips(),
-    });
+    };
+
+    // When ?fields=field1,field2 is provided, return only those fields.
+    // This reduces token overhead for MCP / AI callers that only need
+    // a subset of the response (e.g. version and time).
+    const fieldsParam = this.params?.fields;
+    if (fieldsParam) {
+        const requested = fieldsParam.split(',').map((f) => f.trim()).filter(Boolean);
+        const filtered = {};
+        for (const key of requested) {
+            if (key in full) {
+                filtered[key] = full[key];
+            }
+        }
+        return JSON.stringify(filtered);
+    }
+
+    return JSON.stringify(full);
 };
 
 
@@ -70,7 +87,34 @@ const pingWithTime = function () {
  *     tags:
  *       - Infrastructure
  *     summary: Check server status and parameters
- *     description: Call this endpoint to verify that the server is online and to retrieve fundamental server configuration, time, and Single Sign-On (SSO) identity information if applicable. No parameters are required.
+ *     description: Call this endpoint to verify that the server is online and to retrieve fundamental server configuration, time, and Single Sign-On (SSO) identity information if applicable.
+ *     x-mcp-tool-name: server_status
+ *     x-mcp-description: >
+ *       Use this tool to verify the CaSS server is online, discover its
+ *       version, or retrieve login and SSO configuration. This should be the
+ *       first tool you call when starting a session or diagnosing connectivity
+ *       issues. This tool is read-only and never modifies data. Do NOT use
+ *       this tool to search for data or retrieve objects — use search_data or
+ *       get_object for those tasks. Pass the 'fields' parameter with a
+ *       comma-separated list of field names to reduce the response size.
+ *     x-mcp-hints: >
+ *       For most tasks, fields=version,time is sufficient. Only omit the
+ *       fields parameter if you need the full server configuration.
+ *       Common field sets:
+ *       - Health check: fields=ping
+ *       - Version info: fields=version,time
+ *       - SSO discovery: fields=ssoLogin,ssoLogout,ssoPublicKey
+ *       - Full config: omit the fields parameter.
+ *       Available field names: ping, version, time, ssoViaP1, ssoPublicKey,
+ *       ssoAdditionalPublicKeys, ssoLogin, ssoLogout, banner, motd, plugins,
+ *       adminPublicKeys, corsOrigins, postMaxSize, signatureSheetHashAlgorithm, fips
+ *     parameters:
+ *       - in: query
+ *         name: fields
+ *         schema:
+ *           type: string
+ *         description: Comma-separated list of response field names to return. When omitted, all fields are returned. Use this to reduce response size for MCP or programmatic callers.
+ *         example: version,time,fips
  *     responses:
  *       200:
  *         description: Success
@@ -94,7 +138,7 @@ const pingWithTime = function () {
  *                 version:
  *                   type: string
  *                   description: Current CASS server version from package.json.
- *                   example: 1.6.21
+ *                   example: 1.7.0
  *                 time:
  *                   type: integer
  *                   description: The current number of milliseconds since the Unix epoch, for ensuring signature sheet signing can sign time-nonced signatures that will not be time-desynchronized with the server.

@@ -46,26 +46,25 @@ let fetchAssertions = async function () {
     assertionHash = EcCrypto.md5(concatAssertions);
     return assertions;
 }
-let insertResources = async function(){
-    // Search for resource alignments
-    let bigSearchString = "";
+let insertResources = async function () {
+    // Search for resource alignments, one batch of competencies at a time.
     let countdown = [...this.g.verticies];
     while (countdown.length > 0) {
-        let first = true;
-        for (const vertex of countdown.splice(0, 100)) {
-            if (!first)
-                bigSearchString += " OR ";
-            first = false;
-            bigSearchString += `educationalAlignment.targetUrl:"${vertex.shortId()}"`;
-        }
+        // Fresh query per batch - accumulating clauses across batches would
+        // re-match earlier batches' resources and attach them twice.
+        const bigSearchString = countdown.splice(0, 100)
+            .map(vertex => `educationalAlignment.targetUrl:"${vertex.shortId()}"`)
+            .join(" OR ");
         let results = null;
         let counter = 0;
-        while (results == null && counter++ < 0)
+        // (Was `counter++ < 0`, which never ran: no resources were ever
+        // attached and profile.timeline was always empty.)
+        while (results == null && counter++ < 3)
             try {
                 results = await EcCreativeWork.search(
                     repo,
                     bigSearchString,
-                    null, null, {size: 10000}
+                    null, null, { size: 10000 }
                 );
             } catch (ex) {
                 results = null;
@@ -76,7 +75,16 @@ let insertResources = async function(){
 
         for (let i = 0; i < results.length; i++) {
             const resource = results[i];
-            const vertexId = resource.educationalAlignment.targetUrl;
+            // educationalAlignment is written as an array by the mapping
+            // tools and the xAPI adapter; older records may carry a single
+            // object. Attach the resource to EVERY aligned vertex present
+            // in this graph.
+            let alignments = resource.educationalAlignment;
+            if (alignments != null && !Array.isArray(alignments))
+                alignments = [alignments];
+            for (const alignment of alignments || []) {
+                const vertexId = alignment?.targetUrl;
+                if (vertexId == null) continue;
 
             // TODO When will the meta vertex ever be null?
             let competency = this.g.getCompetencySoft(vertexId);
@@ -86,12 +94,14 @@ let insertResources = async function(){
             if (metaVertex.resources == null)
                 metaVertex.resources = [];
 
-            // Trim alignments, add to metaVertex
-            metaVertex.resources.push(resource);
+                // Trim alignments, add to metaVertex (once)
+                if (!metaVertex.resources.some(r => r.id === resource.id))
+                    metaVertex.resources.push(resource);
+            }
         }
     }
 }
-let processAssertions = async function(){
+let processAssertions = async function () {
     const allPromises = [];
 
     for (const metaVertexId in this.g.metaVerticies) {
@@ -105,15 +115,18 @@ let processAssertions = async function(){
         if (metaVertex.negativeAssertion != null)
             assertions = assertions.concat(metaVertex.negativeAssertion);
 
-        for (const a of assertions) {
+        let competencyIds = [...new Set(assertions.map(x => x.competency))].filter(x => x);
+        await repo.precache(competencyIds);
+
+        await Promise.map(assertions, async (a) => {
             const dataPromises = [
                 a.getSubject(), a.getAgent(), a.getNegative(),
                 a.getAssertionDate(), a.getExpirationDate()
             ];
 
             // Push a promise that handles this assertion
-            allPromises.push(Promise.all(dataPromises).then(
-                async(assertionData) => {
+            allPromises.push(await Promise.all(dataPromises).then(
+                async (assertionData) => {
                     const [subject, agent, negative, assertionDate, expirationDate] = assertionData;
                     let agentPerson;
                     let evidence;
@@ -133,17 +146,17 @@ let processAssertions = async function(){
 
                     if (a.evidence != null) {
                         try {
-                            evidence = await a.getEvidences();
+                            evidence = (await a?.getEvidences?.()) || a.evidence;
                         } catch (e) {
                             // TODO Please make it so getEvidences() does not throw errors in the CaSS library
-                            this.log(`Error decrypting evidence for assertion ${a.shortId()}`);
+                            this.log(`Error decrypting evidence for assertion ${a.shortId()}: ${e}`);
                         }
                     }
 
                     // Compile assertion data
                     const assertionOutput = {
                         negative,
-                        grade: a.grade == null ? undefined : a.grade,
+                        grade: a.grade || a.score || undefined,
                         subject: this.person.name,
                         agent: agentPerson.name,
                         competency: (await EcCompetency.get(a.competency)).getName(),
@@ -161,7 +174,7 @@ let processAssertions = async function(){
                     metaVertex.assertions.push(assertionOutput);
                 }
             ));
-        }
+        }, { concurrency: 10 });
     }
 
     // Return when all assertions of all meta-vertices have been inserted
@@ -269,7 +282,7 @@ let postProcessEachVertex = function (vertex, vertices, topLevelVertices, inEdge
     delete meta.positiveAssertion;
     delete meta.negativeAssertion;
 }   
-let postProcessEachEdge = function(edge,vertices,topLevelVertices,inEdges){
+let postProcessEachEdge = function (edge, vertices, topLevelVertices, inEdges) {
     const relationType = edge.edge.relationType;
     const thisVertex = edge.source;
     const otherVertex = edge.destination;
@@ -322,7 +335,7 @@ let postProcessEachEdge = function(edge,vertices,topLevelVertices,inEdges){
     // else this.err(`Unhandled EcAlignment relationType ${edge.edge.relationType}`);
     // Found so far: isRelatedTo, requires, ...
 }
-let postProcessEachEdgeRepeating = function(edge,vertices,topLevelVertices,inEdges){
+let postProcessEachEdgeRepeating = function (edge, vertices, topLevelVertices, inEdges) {
     // TODO Aren't we just defining two copies of both vertices?
     const vtxSrc = vertices[edge.source.id];
     const vtxDst = vertices[edge.destination.id];
@@ -348,7 +361,7 @@ let postProcessEachEdgeRepeating = function(edge,vertices,topLevelVertices,inEdg
         }
     }
 }
-let postProcessEachVertexRepeating = function(vertex,vertices,topLevelVertices,inEdges){ 
+let postProcessEachVertexRepeating = function (vertex, vertices, topLevelVertices, inEdges) {
     const ms = this.g.getMetaStateCompetency(vertex);
 
     if (inEdges.narrows[vertex.id] != null) {
@@ -408,12 +421,12 @@ let postProcessEachVertexRepeating = function(vertex,vertices,topLevelVertices,i
         }
     }
 }
-let postProcessProfileBefore = function(profile,vertices,topLevelVertices,inEdges){
+let postProcessProfileBefore = function (profile, vertices, topLevelVertices, inEdges) {
     profile.name = this.framework.getName();
     profile.id = this.frameworkId;
     profile.timeline = [];
 }
-let postProcessProfileEachElement = function(obj,inEdges,vertices,visited){
+let postProcessProfileEachElement = function (obj, inEdges, vertices, visited) {
     if (visited == null) 
         visited = [];
     if (obj == null || EcArray.has(visited, obj.id))
@@ -468,7 +481,7 @@ let postProcessProfileEachElement = function(obj,inEdges,vertices,visited){
     // Return data we calculated for parent recursive calls
     return result;
 }    
-let postProcessProfileAfter = function(o, profile){
+let postProcessProfileAfter = function (o, profile) {
     if (o.state != null)
         if ((o.state.isGoal || o.state.requiredForGoalBottomUp) && o.resources != null) {
             profile.timeline = profile.timeline.concat(o.resources);

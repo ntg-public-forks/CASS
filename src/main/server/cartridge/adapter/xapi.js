@@ -83,8 +83,15 @@ var personFromEmail = async function (mbox, name) {
         let people = null;
         people = await loopback.repositorySearch(global.repo, "@type:Person AND email:\"" + mbox + "\"", {});
         if (people != null) {
-            if (people.length >= 1)
+            if (people.length >= 1) {
+                //Sort by timestamp descending
+                people.sort((a, b) => {
+                    let aTime = a.getTimestamp() || 0;
+                    let bTime = b.getTimestamp() || 0;
+                    return bTime - aTime;
+                });
                 person = people[0];
+            }            
             else if (people.length == 0) {
                 var ppk = await EcPpk.generateKey();
                 person = new schema.Person();
@@ -160,11 +167,27 @@ var resolveLanguageMap = function (langMap) {
 }
 
 var getAlignedCompetencies = async function (objectId, xapiObject) {
-    var results = [];
+    let results = [];
     if (alignedCompetenciesCache[objectId] != null)
         return alignedCompetenciesCache[objectId];
+    try {
+        if ((await EcCompetency.get(EcRemoteLinkedData.trimVersionFromUrl(objectId), null, null, repo, xapiIm)) != null)
+        {
+            if (process.env.XAPI_DEBUG) console.log("xAPI object is a competency: " + objectId);
+            results.push({
+                targetUrl: EcRemoteLinkedData.trimVersionFromUrl(objectId)
+            });
+        }
+        if (xapiObject?.definition?.moreInfo != null && xapiObject?.definition?.moreInfo.startsWith("http") && (await EcCompetency.get(EcRemoteLinkedData.trimVersionFromUrl(xapiObject?.definition?.moreInfo))) != null)
+        {
+            if (process.env.XAPI_DEBUG) console.log("xAPI object has a moreInfo competency: " + xapiObject?.definition?.moreInfo);
+            results.push({
+                targetUrl: EcRemoteLinkedData.trimVersionFromUrl(xapiObject?.definition?.moreInfo)
+            });
+        }
+    } catch { }
     let creativeWorks = await loopback.repositorySearch(global.repo, "@type:CreativeWork AND url:\"" + objectId + "\"", {});
-    if (creativeWorks.length === 0 && objectId != null && objectId.startsWith("http")) {
+    if (results.length == 0 && creativeWorks.length === 0 && objectId != null && objectId.startsWith("http")) {
         // No existing CreativeWork found for this xAPI object ID — create one with no alignments.
         let cw = new schema.CreativeWork();
         cw.assignId(global.repo.selectedServer, EcCrypto.md5(objectId));
@@ -286,27 +309,45 @@ var xapiStatement = async function (s, accm) {
     if (process.env.XAPI_DEBUG) console.log("Authority Pks: " + authorityPks.length);
     if (authorityPks.length == 0) return;
 
+    // The assertion agent is drawn from context.contextAgents (IEEE 9274.1.1),
+    // falling back to context.instructor, then to the statement authority.
+    // All resolved parties become owners of the assertion.
+    var contextAgentPks = [];
+    let contextAgents = s.context?.contextAgents;
+    if (contextAgents != null && !EcArray.isArray(contextAgents))
+        contextAgents = [contextAgents];
+    if (contextAgents != null)
+        for (let contextAgent of contextAgents) {
+            if (contextAgent?.agent == null) continue;
+            if (contextAgent.objectType != null && contextAgent.objectType != "contextAgent") continue;
+            contextAgentPks = contextAgentPks.concat(await pkFromMbox.call(this, contextAgent.agent));
+        }
+    var instructorPks = [];
+    if (s.context?.instructor != null)
+        instructorPks = await pkFromMbox.call(this, s.context.instructor);
+    var agentPks = contextAgentPks;
+    if (agentPks.length == 0)
+        agentPks = instructorPks;
+    if (agentPks.length == 0)
+        agentPks = authorityPks;
+    if (process.env.XAPI_DEBUG) console.log("Context Agent Pks: " + contextAgentPks.length + " Instructor Pks: " + instructorPks.length + " Agent Pks: " + agentPks.length);
+
     if (s.object == null) return;
 
     let alignedCompetencies = await getAlignedCompetencies.call(this, s.object.id, s.object);
-    try{
-    if (s?.object?.id != null && s?.object?.id.startsWith("http") && (await EcCompetency.get(EcRemoteLinkedData.trimVersionFromUrl(s?.object?.id), null, null, repo, xapiIm)) != null)
-        alignedCompetencies.push({
-            targetUrl: EcRemoteLinkedData.trimVersionFromUrl(s.object.id)
-        });
-    if (s?.object?.definition?.moreInfo != null && s?.object?.definition?.moreInfo.startsWith("http") && (await EcCompetency.get(EcRemoteLinkedData.trimVersionFromUrl(s?.object?.definition?.moreInfo))) != null)
-        alignedCompetencies.push({
-            targetUrl: EcRemoteLinkedData.trimVersionFromUrl(s?.object?.definition?.moreInfo)
-        });
-    } catch {}
     if (process.env.XAPI_DEBUG) console.log("Aligned Competencies: " + alignedCompetencies.length);
     let alreadyAligned = {};
     for (let i = 0; i < alignedCompetencies.length; i++) {
         let a = new EcAssertion();
         a.assignId(global.repo.selectedServer, EcCrypto.md5(s.id + alignedCompetencies[i].targetUrl));
         a.addOwner(EcPpk.fromPem(xapiMePpk).toPk());
+        a.addOwner(EcPk.fromPem(skyrepoAdminPk()));
         for (let authorityPk of authorityPks)
             await a.addOwner(authorityPk);
+        for (let contextAgentPk of contextAgentPks)
+            await a.addOwner(contextAgentPk);
+        for (let instructorPk of instructorPks)
+            await a.addOwner(instructorPk);
         for (let actorPk of actorPks) {
             await a.addReader(actorPk);
         }
@@ -345,9 +386,15 @@ var xapiStatement = async function (s, accm) {
         }
         global.events.person.assertionAbout.next(actorPks[0]);
         await a.setSubject(actorPks[0]);
-        await a.setAgent(authorityPks[0]);
+        await a.setAgent(agentPks[0]);
         a.competency = alignedCompetencies[i].targetUrl;
-        a.framework = alignedCompetencies[i].educationalFramework;
+        // educationalFramework is schema.org Text: newer alignments carry
+        // the framework @id, legacy ones a display name. assertion.framework
+        // must be a framework id (vision/search and bayes match on it), so
+        // only a URI is usable; otherwise leave it unset for the vision
+        // competency->framework backfill to fill.
+        const alignedFramework = alignedCompetencies[i].educationalFramework;
+        a.framework = /^https?:\/\//i.test(alignedFramework) ? alignedFramework : undefined;
         if (alreadyAligned[a.competency + a.framework] == true)
             continue;
         alreadyAligned[a.competency + a.framework] = true;
@@ -372,7 +419,11 @@ var xapiStatementListener = async function () {
     let accm = [];
     if (process.env.XAPI_DEBUG) console.log(this.params, this.dataStreams, this?.ctx?.req?.rawHeaders, this?.ctx?.req?.headers);
     for (let val in this.dataStreams) {
-        console.log(val, this.dataStreams[val]);
+        //Convert datastream to JSON if it is a string
+        if (typeof this.dataStreams[val] === "string") {
+            this.dataStreams[val] = JSON.parse(this.dataStreams[val]);
+        }
+        console.log(val, this.dataStreams[val], typeof this.dataStreams[val]);
         await xapiStatement(this.dataStreams[val], accm);
     }
     if (accm.length > 0) {
@@ -495,6 +546,7 @@ if (!global.disabledAdapters['xapi']) {
      * @openapi
      * /api/xapi/tick:
      *   post:
+     *     x-mcp-ignore: true
      *     tags:
      *       - xAPI Adapter
      *     summary: Manually trigger one xAPI polling cycle
@@ -513,6 +565,7 @@ if (!global.disabledAdapters['xapi']) {
      * @openapi
      * /api/xapi/pk:
      *   get:
+     *     x-mcp-ignore: true
      *     tags:
      *       - xAPI Adapter
      *     summary: Get the xAPI adapter public key
@@ -531,22 +584,381 @@ if (!global.disabledAdapters['xapi']) {
      * @openapi
      * /api/xapi/statement:
      *   post:
-     *     x-mcp-ignore: true
      *     tags:
      *       - xAPI Adapter
-     *     summary: Receive a single xAPI statement
+     *     summary: Receive a single xAPI statement and convert to CaSS assertions
+     *     x-mcp-tool-name: record_evidence
+     *     x-mcp-description: >
+     *       Use this tool to record evidence that a person has demonstrated
+     *       (or failed to demonstrate) a competency. Send an xAPI statement
+     *       describing the experience and CaSS will automatically create
+     *       encrypted competency assertions.
+     *       HOW IT WORKS - (1) The actor (identified by email or account name)
+     *       is resolved to a CaSS Person (created automatically if needed).
+     *       (2) The object.id is matched against CaSS competencies, either
+     *       directly by URL or via a CreativeWork's educationalAlignment.
+     *       (3) The result determines positive or negative: result.success
+     *       true/false, result.score.scaled above/below 0.7, or
+     *       result.response of Pass/Fail. At least one result field is
+     *       required or the statement is silently ignored.
+     *       (4) An encrypted Assertion is created per aligned competency.
+     *       BOUNDARIES - Do NOT use this tool to directly create or modify
+     *       assertion objects in the repository. This tool handles the
+     *       entire pipeline automatically. Do NOT use this tool to query
+     *       what someone knows — use get_learner_profile for that.
+     *       IMPORTANT - The statement JSON must be sent as
+     *       multipart/form-data. The form field name does not matter.
+     *     x-mcp-hints: >
+     *       MINIMAL EXAMPLE -
+     *       {"actor":{"mbox":"mailto:jane.doe@example.com","name":"Jane Doe"},
+     *       "verb":{"id":"http://adlnet.gov/expapi/verbs/passed"},
+     *       "object":{"id":"https://lms.example.com/quiz/123"},
+     *       "result":{"success":true},
+     *       "authority":{"mbox":"mailto:admin@lms.example.com","name":"Example LMS"},
+     *       "timestamp":"2026-06-28T12:00:00Z"}.
+     *       COMPETENCY ALIGNMENT - (a) A CreativeWork in CaSS with url matching
+     *       object.id and educationalAlignment entries pointing to competencies,
+     *       (b) object.id is itself a direct CaSS competency URL, or
+     *       (c) object.definition.moreInfo is a competency URL. If no
+     *       CreativeWork exists, one is auto-created for future alignment.
+     *       ACTOR - Use mbox with mailto: prefix or account.name with
+     *       account.homePage. Person is created automatically if not found.
+     *       AUTHORITY - Identifies who is making the claim (LMS, proctor, AI
+     *       agent). Resolved to a CaSS Person who becomes owner of the
+     *       assertion. Always set this to identify the evidence source.
+     *       AGENT RESOLUTION - The assertion's agent is drawn from
+     *       context.contextAgents (IEEE 9274.1.1 contextAgent Objects) first,
+     *       then context.instructor, then authority. All resolved
+     *       contextAgents, the instructor, and the authority become owners
+     *       of the assertion.
+     *       COMMON VERBS - http://adlnet.gov/expapi/verbs/passed,
+     *       failed, completed, mastered, scored, demonstrated. CaSS does
+     *       not filter by verb — any verb works if a result is present.
+     *       AI AGENT GUIDANCE - When you observe someone demonstrate a
+     *       competency, search for it with search_data (q=name:keyword AND
+     *       type:Competency), then call record_evidence with verb
+     *       "demonstrated" and object.id set to the competency URL directly.
+     *       Call get_learner_profile with flushCache=true after to see
+     *       the updated profile.
      *     description: |
-     *       Accepts an xAPI statement via POST and converts it into CaSS
-     *       assertions based on aligned competencies. The statement should
-     *       be sent as form data.
+     *       Accepts an xAPI statement (Experience API / Tin Can API) and converts
+     *       it into CaSS competency assertions based on aligned competencies.
+     *
+     *       **How CaSS processes xAPI statements:**
+     *       1. The `actor` is resolved to a CaSS Person via their `mbox` (email)
+     *          or `account.name`. If no Person exists, one is created.
+     *       2. The `object.id` is matched against CaSS CreativeWork URLs to find
+     *          `educationalAlignment` entries linking to competencies. If the
+     *          object ID is itself a competency URL, it is used directly.
+     *          If no CreativeWork exists, one is auto-created for future alignment.
+     *       3. The `result` determines positive/negative assertion:
+     *          - `result.success: true` → positive assertion
+     *          - `result.success: false` → negative assertion
+     *          - `result.score.scaled > 0.7` → positive; `<= 0.7` → negative
+     *          - `result.response`: "Pass"/"At Expectation"/"Above Expectation" → positive;
+     *            "Fail"/"Below Expectation" → negative
+     *       4. An encrypted CaSS Assertion is created for each aligned competency,
+     *          owned by the `authority` and readable by the `actor`.
+     *       5. The assertion's agent (who is making the claim) is resolved from
+     *          `context.contextAgents` (per IEEE 9274.1.1), falling back to
+     *          `context.instructor`, then to the statement `authority`. All
+     *          resolved contextAgents, the instructor, and the authority are
+     *          granted ownership of the assertion.
+     *       6. `context.registration` is preserved on the assertion for grouping.
+     *
+     *       **Required fields:** `actor`, `verb`, `object`, `result` (with at least
+     *       one of `success`, `score.scaled`, or `response`).
+     *
+     *       The statement should be sent as the request body in a named form-data
+     *       field. The field name is not significant — CaSS processes all data
+     *       streams attached to the request.
      *     requestBody:
+     *       required: true
      *       content:
      *         multipart/form-data:
      *           schema:
      *             type: object
+     *             properties:
+     *               statement:
+     *                 type: object
+     *                 description: A complete xAPI statement object.
+     *                 required:
+     *                   - actor
+     *                   - verb
+     *                   - object
+     *                   - result
+     *                 properties:
+     *                   id:
+     *                     type: string
+     *                     format: uuid
+     *                     description: Unique statement identifier (UUID). Used to generate deterministic assertion IDs.
+     *                     example: "12345678-1234-1234-1234-123456789012"
+     *                   actor:
+     *                     type: object
+     *                     description: |
+     *                       The learner or group who performed the activity.
+     *                       CaSS resolves the actor to a Person record via `mbox` (mailto: email)
+     *                       or `account.name`. If objectType is "Group", each member is resolved
+     *                       individually and a composite Person is created.
+     *                     properties:
+     *                       objectType:
+     *                         type: string
+     *                         enum: [Agent, Group]
+     *                         default: Agent
+     *                       name:
+     *                         type: string
+     *                         description: Display name of the actor.
+     *                         example: "Jane Doe"
+     *                       mbox:
+     *                         type: string
+     *                         description: "mailto: URI of the actor's email. Primary identifier for Person lookup."
+     *                         example: "mailto:jane.doe@example.com"
+     *                       account:
+     *                         type: object
+     *                         description: Alternative identifier when mbox is unavailable.
+     *                         properties:
+     *                           homePage:
+     *                             type: string
+     *                             example: "https://lms.example.com"
+     *                           name:
+     *                             type: string
+     *                             description: Account username or ID. Used as Person identifier lookup.
+     *                             example: "jdoe123"
+     *                       member:
+     *                         type: array
+     *                         description: Group members (only when objectType is "Group").
+     *                         items:
+     *                           type: object
+     *                           properties:
+     *                             name:
+     *                               type: string
+     *                             mbox:
+     *                               type: string
+     *                   verb:
+     *                     type: object
+     *                     description: |
+     *                       The action performed. CaSS does not filter by verb —
+     *                       any verb is accepted as long as a result is present.
+     *                       Common xAPI verbs include completed, passed, failed, scored, mastered.
+     *                     properties:
+     *                       id:
+     *                         type: string
+     *                         format: uri
+     *                         description: IRI identifying the verb.
+     *                         example: "http://adlnet.gov/expapi/verbs/completed"
+     *                       display:
+     *                         type: object
+     *                         description: Human-readable verb name as a language map.
+     *                         properties:
+     *                           en-US:
+     *                             type: string
+     *                             example: "completed"
+     *                   object:
+     *                     type: object
+     *                     description: |
+     *                       The activity or competency the statement is about.
+     *                       `object.id` is matched against CaSS CreativeWork URLs to find
+     *                       competency alignments. If object.id is itself a competency URL
+     *                       in CaSS, it is used directly. `object.definition.moreInfo` is
+     *                       also checked as a secondary competency URL.
+     *                     required:
+     *                       - id
+     *                     properties:
+     *                       id:
+     *                         type: string
+     *                         format: uri
+     *                         description: |
+     *                           IRI identifying the activity. This is matched against
+     *                           CreativeWork.url in CaSS to find aligned competencies.
+     *                           Can also be a direct CaSS competency URL.
+     *                         example: "https://lms.example.com/courses/cybersecurity-101/quiz-3"
+     *                       objectType:
+     *                         type: string
+     *                         default: Activity
+     *                       definition:
+     *                         type: object
+     *                         properties:
+     *                           name:
+     *                             type: object
+     *                             description: Language map for activity name.
+     *                             properties:
+     *                               en-US:
+     *                                 type: string
+     *                                 example: "Cybersecurity 101 - Quiz 3"
+     *                           description:
+     *                             type: object
+     *                             description: Language map for activity description.
+     *                             properties:
+     *                               en-US:
+     *                                 type: string
+     *                                 example: "Assessment of basic cybersecurity concepts"
+     *                           moreInfo:
+     *                             type: string
+     *                             format: uri
+     *                             description: |
+     *                               Secondary URL checked as a direct competency URL in CaSS.
+     *                               Use this to explicitly link a statement to a CaSS competency.
+     *                   result:
+     *                     type: object
+     *                     description: |
+     *                       The outcome of the activity. At least one of `success`,
+     *                       `score`, or `response` is required for CaSS to create an assertion.
+     *                       Determines whether the assertion is positive or negative.
+     *                     properties:
+     *                       success:
+     *                         type: boolean
+     *                         description: "true = positive assertion, false = negative assertion."
+     *                         example: true
+     *                       score:
+     *                         type: object
+     *                         description: Numeric score. `scaled > 0.7` = positive, `<= 0.7` = negative.
+     *                         properties:
+     *                           scaled:
+     *                             type: number
+     *                             minimum: 0
+     *                             maximum: 1
+     *                             description: "Normalized score between 0 and 1. Threshold is 0.7."
+     *                             example: 0.85
+     *                           raw:
+     *                             type: number
+     *                             description: Raw score value.
+     *                             example: 85
+     *                           min:
+     *                             type: number
+     *                             example: 0
+     *                           max:
+     *                             type: number
+     *                             example: 100
+     *                       response:
+     *                         type: string
+     *                         description: |
+     *                           Text response. Recognized values:
+     *                           - "Pass", "At Expectation", "Above Expectation" → positive
+     *                           - "Fail", "Below Expectation" → negative
+     *                         enum: [Pass, Fail, At Expectation, Above Expectation, Below Expectation]
+     *                       completion:
+     *                         type: boolean
+     *                         description: Whether the activity was completed (informational, not used for assertion logic).
+     *                   context:
+     *                     type: object
+     *                     description: |
+     *                       Context for the statement. `registration` UUID is preserved on
+     *                       the assertion. `contextAgents` (IEEE 9274.1.1) or `instructor`
+     *                       may identify the agent making the claim — see the
+     *                       assertion agent resolution order above.
+     *                     properties:
+     *                       registration:
+     *                         type: string
+     *                         format: uuid
+     *                         description: UUID grouping related statements (e.g., a course attempt). Stored on the assertion.
+     *                         example: "ec531277-b9b7-4700-a81d-1a43e3be340e"
+     *                       contextAgents:
+     *                         type: array
+     *                         description: |
+     *                           Collection of contextAgent Objects (IEEE 9274.1.1) describing
+     *                           relationships between Agents and this statement. The first
+     *                           contextAgent that resolves to a CaSS Person becomes the
+     *                           assertion's agent, taking precedence over `instructor` and
+     *                           `authority`. All resolved contextAgents become owners of
+     *                           the assertion.
+     *                         items:
+     *                           type: object
+     *                           required:
+     *                             - objectType
+     *                             - agent
+     *                           properties:
+     *                             objectType:
+     *                               type: string
+     *                               enum: [contextAgent]
+     *                             agent:
+     *                               type: object
+     *                               description: An Agent Object, resolved to a CaSS Person via mbox/account, same as actor.
+     *                               properties:
+     *                                 name:
+     *                                   type: string
+     *                                   example: "Pat Instructor"
+     *                                 mbox:
+     *                                   type: string
+     *                                   example: "mailto:pat.instructor@example.com"
+     *                             relevantTypes:
+     *                               type: array
+     *                               description: Relevant Type IRIs categorizing the relationship.
+     *                               items:
+     *                                 type: string
+     *                                 format: uri
+     *                       instructor:
+     *                         type: object
+     *                         description: |
+     *                           Instructor Agent that the statement relates to. Used as the
+     *                           assertion's agent when no `contextAgents` entry resolves,
+     *                           and granted ownership of the assertion when present.
+     *                           Not recommended by IEEE 9274.1.1 — prefer `contextAgents`;
+     *                           supported for backward compatibility.
+     *                         properties:
+     *                           name:
+     *                             type: string
+     *                           mbox:
+     *                             type: string
+     *                   authority:
+     *                     type: object
+     *                     description: |
+     *                       The agent asserting the truth of the statement (e.g., the LMS).
+     *                       Resolved to a CaSS Person via mbox/account, same as actor.
+     *                       The authority becomes an owner of the resulting assertion, and
+     *                       is used as the assertion's agent when neither
+     *                       `context.contextAgents` nor `context.instructor` resolves.
+     *                     properties:
+     *                       objectType:
+     *                         type: string
+     *                         default: Agent
+     *                       name:
+     *                         type: string
+     *                         example: "LMS System"
+     *                       mbox:
+     *                         type: string
+     *                         example: "mailto:admin@lms.example.com"
+     *                   timestamp:
+     *                     type: string
+     *                     format: date-time
+     *                     description: ISO 8601 timestamp of when the experience occurred. Used as the assertion date.
+     *                     example: "2026-06-28T12:00:00Z"
+     *           example:
+     *             statement:
+     *               id: "12345678-1234-1234-1234-123456789012"
+     *               actor:
+     *                 objectType: "Agent"
+     *                 name: "Jane Doe"
+     *                 mbox: "mailto:jane.doe@example.com"
+     *               verb:
+     *                 id: "http://adlnet.gov/expapi/verbs/passed"
+     *                 display:
+     *                   en-US: "passed"
+     *               object:
+     *                 id: "https://lms.example.com/courses/cybersecurity-101/final-exam"
+     *                 objectType: "Activity"
+     *                 definition:
+     *                   name:
+     *                     en-US: "Cybersecurity 101 Final Exam"
+     *                   description:
+     *                     en-US: "Final assessment for the Cybersecurity 101 course"
+     *               result:
+     *                 success: true
+     *                 score:
+     *                   scaled: 0.92
+     *                   raw: 92
+     *                   min: 0
+     *                   max: 100
+     *                 completion: true
+     *               context:
+     *                 registration: "ec531277-b9b7-4700-a81d-1a43e3be340e"
+     *               authority:
+     *                 objectType: "Agent"
+     *                 name: "Example LMS"
+     *                 mbox: "mailto:admin@lms.example.com"
+     *               timestamp: "2026-06-28T12:00:00Z"
      *     responses:
      *       200:
-     *         description: Statement processed and assertions created.
+     *         description: Statement processed and assertions created for each aligned competency.
      */
     bindWebService("/xapi/statement", xapiStatementListener);
 
@@ -577,6 +989,7 @@ if (!global.disabledAdapters['xapi']) {
      * @openapi
      * /api/xapi/endpoint:
      *   get:
+     *     x-mcp-ignore: true
      *     tags:
      *       - xAPI Adapter
      *     summary: Proxy-fetch statements from the configured LRS

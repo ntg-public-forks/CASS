@@ -98,7 +98,7 @@ let processAssertions = async function(){
             ];
 
             // Push a promise that handles this assertion
-            allPromises.push(Promise.all(dataPromises).then(
+            allPromises.push(await Promise.all(dataPromises).then(
                 async(assertionData) => {
                     const [subject, agent, negative, assertionDate, expirationDate] = assertionData;
                     let agentPerson;

@@ -974,8 +974,10 @@ function conceptArrays(object) {
                                     if (k.indexOf("ceasn:dateModified") != 0)
                                         if (k.indexOf("ceasn:license") != 0)
                                             if (k.indexOf("ceasn:publicationStatusType") != 0)
-                                                if (k.indexOf("ceasn:publisher") != 0)
-                                                    if (k.indexOf("ceasn:publisherName") != 0)
+                                                // ceasn:publisher is repeatable and must export as an
+                                                // array (cass-editor#1427); only publisherName (a
+                                                // language map) stays excluded.
+                                                if (k !== "ceasn:publisherName")
                                                         if (k.indexOf("ceasn:rights") != 0)
                                                             if (k.indexOf("skos:broader") != 0)
                                                                 if (k.indexOf("skos:definition") != 0)
@@ -1890,6 +1892,7 @@ if (!global.disabledAdapters['ceasn']) {
      * @openapi
      * /api/ceasn/{id}:
      *   get:
+     *     x-mcp-ignore: true
      *     tags:
      *       - CEASN Adapter
      *     summary: Export a framework as CE/ASN JSON-LD
@@ -1913,6 +1916,7 @@ if (!global.disabledAdapters['ceasn']) {
      *       404:
      *         description: Framework not found.
      *   post:
+     *     x-mcp-ignore: true
      *     tags:
      *       - CEASN Adapter
      *     summary: Import a CE/ASN JSON-LD framework

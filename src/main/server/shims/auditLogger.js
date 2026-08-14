@@ -64,6 +64,7 @@ const InverseSeverity = {
 let logBuffers = [];
 let timeoutHandler;
 let previousHash = '';
+let lastLoggedMessage = '';
 
 
 let flush = function () {
@@ -101,6 +102,11 @@ let report = function (system, severity, message, ...data) {
     if (process.env.PRODUCTION == 'true') {
         try {
             if (filterLogs(system, severity, message)) {
+                const truncatedMsg = JSON.stringify({ message, data, system, severity })
+                if (truncatedMsg === lastLoggedMessage) {
+                    return;
+                }
+                lastLoggedMessage = truncatedMsg;
                 const msg = JSON.stringify({ date: new Date(), message, data, system, severity });
                 logBuffers.push(hash(msg));
             }
@@ -121,7 +127,7 @@ let report = function (system, severity, message, ...data) {
         if (severity <= Severity.SERVICE || global.skyrepoDebug) {
             try {
                 if (severity == Severity.ERROR)
-                    console.trace(data[0] || data);
+                    console.trace(data);
                 if (EcArray.isArray(data)) data = JSON.stringify(data);
                 console.log(new Date(), system, ((((v8.getHeapStatistics().used_heap_size) / 1024 / 1024).toFixed(0)) + "M").padEnd(5, " "), InverseSeverity[severity], '', message.substr(0, 18).padEnd(18, " "), data);
             } catch (ex) {

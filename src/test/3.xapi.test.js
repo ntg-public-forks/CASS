@@ -13,6 +13,7 @@ describe('xAPI Adapter', function () {
     let framework;
     let c1, c2, c3;
     let emailPrefix;
+    let agentEmail;
     let activityBaseUrl;
 
     it('Waiting for server to be ready', async () => {
@@ -116,7 +117,8 @@ describe('xAPI Adapter', function () {
         let agentPerson = new EcPerson();
         agentPerson.assignId(repo.selectedServer, agent.ppk.toPk().fingerprint());
         agentPerson.addOwner(agent.ppk.toPk());
-        agentPerson.email = 'xapiagent' + new Date().getTime() + '@test.com';
+        agentEmail = 'xapiagent' + new Date().getTime() + '@test.com';
+        agentPerson.email = agentEmail;
         agentPerson.setName("xAPI Test Agent Person");
         await repo.saveTo(agentPerson);
 
@@ -516,6 +518,233 @@ describe('xAPI Adapter', function () {
             const res = await fetch(`${CASS_LOOPBACK}xapi/statement`, { method: 'POST', body: formData });
             assert.strictEqual(res.status, 200);
             // No assertion should have been created — this is an implicit success
+        });
+    });
+
+    describe('Direct competency URL as object.id', function () {
+        it('Submit xAPI statement with competency URL as object.id and verify positive assertion', async () => {
+            const stmt = buildXapiStatement({
+                objectId: c1.shortId(),
+                objectName: "Direct Competency C1",
+                result: { success: true }
+            });
+            await submitStatement(stmt);
+
+            const url = `${repo.selectedServer}profile/latest?subject=${emailPrefix}&frameworkId=${framework.shortId()}&cache=false&flushCache=true`;
+            const res = await fetch(url);
+            let text = await res.text();
+            assert.strictEqual(res.status, 200, 'Failed to fetch profile: ' + text);
+            const profile = JSON.parse(text);
+
+            const comp2 = profile.children.find(c => c.id === c2.shortId());
+            assert.isDefined(comp2, 'C2 should be in profile children');
+            const comp1 = comp2.children.find(c => c.id === c1.shortId());
+            assert.isDefined(comp1, 'C1 should be a child of C2');
+            assert.isTrue(comp1.state.hasPositiveEvidence, 'C1 should have positive evidence from direct competency object.id');
+        });
+
+        it('Submit xAPI statement with competency URL as object.id and verify negative assertion', async () => {
+            const stmt = buildXapiStatement({
+                objectId: c3.shortId(),
+                objectName: "Direct Competency C3",
+                result: { success: false }
+            });
+            await submitStatement(stmt);
+
+            const url = `${repo.selectedServer}profile/latest?subject=${emailPrefix}&frameworkId=${framework.shortId()}&cache=false&flushCache=true`;
+            const res = await fetch(url);
+            let text = await res.text();
+            assert.strictEqual(res.status, 200, 'Failed to fetch profile: ' + text);
+            const profile = JSON.parse(text);
+
+            const comp3 = profile.children.find(c => c.id === c3.shortId());
+            assert.isDefined(comp3, 'C3 should be in profile');
+            assert.isTrue(comp3.state.hasNegativeEvidence, 'C3 should have negative evidence from direct competency object.id');
+        });
+
+        it('Submit xAPI statement with score-based result using competency URL as object.id', async () => {
+            const stmt = buildXapiStatement({
+                objectId: c2.shortId(),
+                objectName: "Direct Competency C2 - Scored",
+                result: { score: { scaled: 0.95 } }
+            });
+            await submitStatement(stmt);
+
+            const url = `${repo.selectedServer}profile/latest?subject=${emailPrefix}&frameworkId=${framework.shortId()}&cache=false&flushCache=true`;
+            const res = await fetch(url);
+            let text = await res.text();
+            assert.strictEqual(res.status, 200, 'Failed to fetch profile: ' + text);
+            const profile = JSON.parse(text);
+
+            const comp2 = profile.children.find(c => c.id === c2.shortId());
+            assert.isDefined(comp2, 'C2 should be in profile');
+            assert.isTrue(comp2.state.hasPositiveEvidence, 'C2 should have positive evidence from high score via direct competency URL');
+        });
+
+        it('No CreativeWork is auto-created when object.id is a valid competency URL', async () => {
+            // Search for CreativeWorks with url matching the competency ID
+            let creativeWorks = await repo.searchWithParams(
+                `@type:CreativeWork AND url:"${c1.shortId()}"`,
+                { size: 10 }
+            );
+            assert.strictEqual(creativeWorks.length, 0, 'No CreativeWork should be auto-created when object.id resolves to a competency');
+        });
+    });
+
+    describe('Competency URL via object.definition.moreInfo', function () {
+        it('Submit xAPI statement with moreInfo pointing to a competency and verify assertion', async () => {
+            const moreInfoActivityUrl = activityBaseUrl + 'moreinfo-test-' + new Date().getTime();
+            const stmt = buildXapiStatement({
+                objectId: moreInfoActivityUrl,
+                objectName: "Activity with moreInfo",
+                definition: {
+                    name: { "en-US": "Activity with moreInfo Competency Link" },
+                    description: { "en-US": "Tests moreInfo-based competency resolution" },
+                    moreInfo: c2.shortId()
+                },
+                result: { success: true }
+            });
+            await submitStatement(stmt);
+
+            const url = `${repo.selectedServer}profile/latest?subject=${emailPrefix}&frameworkId=${framework.shortId()}&cache=false&flushCache=true`;
+            const res = await fetch(url);
+            let text = await res.text();
+            assert.strictEqual(res.status, 200, 'Failed to fetch profile: ' + text);
+            const profile = JSON.parse(text);
+
+            const comp2 = profile.children.find(c => c.id === c2.shortId());
+            assert.isDefined(comp2, 'C2 should be in profile');
+            assert.isTrue(comp2.state.hasPositiveEvidence, 'C2 should have positive evidence from moreInfo competency link');
+        });
+
+        it('Submit xAPI statement with moreInfo pointing to a different competency and verify negative assertion', async () => {
+            const moreInfoActivityUrl2 = activityBaseUrl + 'moreinfo-test2-' + new Date().getTime();
+            const stmt = buildXapiStatement({
+                objectId: moreInfoActivityUrl2,
+                objectName: "Activity with moreInfo to C3",
+                definition: {
+                    name: { "en-US": "Activity with moreInfo to C3" },
+                    moreInfo: c3.shortId()
+                },
+                result: { score: { scaled: 0.3 } }
+            });
+            await submitStatement(stmt);
+
+            const url = `${repo.selectedServer}profile/latest?subject=${emailPrefix}&frameworkId=${framework.shortId()}&cache=false&flushCache=true`;
+            const res = await fetch(url);
+            let text = await res.text();
+            assert.strictEqual(res.status, 200, 'Failed to fetch profile: ' + text);
+            const profile = JSON.parse(text);
+
+            const comp3 = profile.children.find(c => c.id === c3.shortId());
+            assert.isDefined(comp3, 'C3 should be in profile');
+            assert.isTrue(comp3.state.hasNegativeEvidence, 'C3 should have negative evidence from low score via moreInfo');
+        });
+    });
+
+    describe('Assertion agent resolution (IEEE 9274.1.1)', function () {
+        /**
+         * Helper: Find the assertion created for a statement (by its unique
+         * context.registration) and fetch the full object.
+         */
+        async function getAssertionByRegistration(registration) {
+            let assertions = await repo.searchWithParams(
+                `registration:"${registration}"`,
+                { size: 10, index_hint: "*assertion" }
+            );
+            assert.isTrue(assertions.length > 0, 'Should find the assertion by registration');
+            // Search results have encrypted payloads stripped — fetch the full object.
+            let full = await EcRepository.get(assertions[0].shortId());
+            let a = new EcAssertion();
+            a.copyFrom(full);
+            return a;
+        }
+
+        /**
+         * Helper: Decrypt the assertion's agent and return its PEM.
+         */
+        async function agentPemOf(a) {
+            let agentPk = await a.getAgent();
+            assert.isNotNull(agentPk, 'Should be able to decrypt the assertion agent');
+            return agentPk.toPem();
+        }
+
+        it('Agent is drawn from context.contextAgents first', async () => {
+            const registration = EcCrypto.generateUUID();
+            const stmt = buildXapiStatement({
+                objectId: c1.shortId(),
+                result: { success: true },
+                context: {
+                    registration: registration,
+                    contextAgents: [{
+                        objectType: "contextAgent",
+                        agent: { objectType: "Agent", mbox: "mailto:" + agentEmail, name: "xAPI Test Agent Person" },
+                        relevantTypes: ["https://w3id.org/xapi/acrossx/verbs/instructed"]
+                    }],
+                    // Instructor pointing elsewhere — contextAgents should win.
+                    instructor: { objectType: "Agent", mbox: "mailto:" + emailPrefix, name: "xAPI Test User" }
+                }
+            });
+            await submitStatement(stmt);
+
+            const a = await getAssertionByRegistration(registration);
+            assert.strictEqual(await agentPemOf(a), agent.ppk.toPk().toPem(), 'Assertion agent should be the contextAgent person');
+            assert.include(a.owner, agent.ppk.toPk().toPem(), 'Resolved contextAgent should be an owner of the assertion');
+            assert.include(a.owner, user.ppk.toPk().toPem(), 'Resolved instructor should also be an owner of the assertion');
+        });
+
+        it('Agent falls back to context.instructor when contextAgents is absent', async () => {
+            const registration = EcCrypto.generateUUID();
+            const stmt = buildXapiStatement({
+                objectId: c1.shortId(),
+                result: { success: true },
+                context: {
+                    registration: registration,
+                    instructor: { objectType: "Agent", mbox: "mailto:" + agentEmail, name: "xAPI Test Agent Person" }
+                }
+            });
+            await submitStatement(stmt);
+
+            const a = await getAssertionByRegistration(registration);
+            assert.strictEqual(await agentPemOf(a), agent.ppk.toPk().toPem(), 'Assertion agent should be the instructor person');
+            assert.include(a.owner, agent.ppk.toPk().toPem(), 'Resolved instructor should be an owner of the assertion');
+        });
+
+        it('Agent falls back to authority when neither contextAgents nor instructor is present', async () => {
+            const registration = EcCrypto.generateUUID();
+            const stmt = buildXapiStatement({
+                objectId: c1.shortId(),
+                result: { success: true },
+                authorityEmail: agentEmail,
+                context: { registration: registration }
+            });
+            await submitStatement(stmt);
+
+            const a = await getAssertionByRegistration(registration);
+            assert.strictEqual(await agentPemOf(a), agent.ppk.toPk().toPem(), 'Assertion agent should be the authority person');
+            assert.include(a.owner, agent.ppk.toPk().toPem(), 'Resolved authority should be an owner of the assertion');
+        });
+
+        it('Non-contextAgent entries are skipped and resolution falls through to instructor', async () => {
+            const registration = EcCrypto.generateUUID();
+            const stmt = buildXapiStatement({
+                objectId: c1.shortId(),
+                result: { success: true },
+                context: {
+                    registration: registration,
+                    contextAgents: [{
+                        objectType: "contextGroup",
+                        agent: { objectType: "Agent", mbox: "mailto:" + emailPrefix, name: "xAPI Test User" }
+                    }],
+                    instructor: { objectType: "Agent", mbox: "mailto:" + agentEmail, name: "xAPI Test Agent Person" }
+                }
+            });
+            await submitStatement(stmt);
+
+            const a = await getAssertionByRegistration(registration);
+            assert.strictEqual(await agentPemOf(a), agent.ppk.toPk().toPem(), 'Assertion agent should skip the invalid entry and use the instructor');
+            assert.include(a.owner, agent.ppk.toPk().toPem(), 'Resolved instructor should be an owner of the assertion');
+            assert.notInclude(a.owner, user.ppk.toPk().toPem(), 'Skipped non-contextAgent entry should not be granted ownership');
         });
     });
 
