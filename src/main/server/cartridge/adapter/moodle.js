@@ -619,11 +619,12 @@ async function moodleSyncPull(guid, contextId) {
 }
 
 async function moodlePush() {
-    let id = this.params.id;
-    let contextId = this.params.contextid ? parseInt(this.params.contextid) : null;
+    let body = this.dataStreams?.body || this.dataStreams?.data;
+    let id = this.params.id || body?.id;
+    let contextId = this.params.contextid ? parseInt(this.params.contextid) : (body?.contextid ? parseInt(body.contextid) : null);
 
     if (!id) {
-        error("Missing required query parameter: id", 400);
+        error("Missing required parameter: id", 400);
     }
 
     try {
@@ -639,11 +640,12 @@ async function moodlePush() {
 }
 
 async function moodlePull() {
-    let id = this.params.id;
-    let contextId = this.params.contextid ? parseInt(this.params.contextid) : null;
+    let body = this.dataStreams?.body || this.dataStreams?.data;
+    let id = this.params.id || body?.id;
+    let contextId = this.params.contextid ? parseInt(this.params.contextid) : (body?.contextid ? parseInt(body.contextid) : null);
 
     if (!id) {
-        error("Missing required query parameter: id", 400);
+        error("Missing required parameter: id", 400);
     }
 
     try {
@@ -677,7 +679,6 @@ if (!global.disabledAdapters['moodle']) {
          *     parameters:
          *       - in: query
          *         name: id
-         *         required: true
          *         schema:
          *           type: string
          *         description: The 36-character GUID of the CaSS framework to push.
@@ -686,6 +687,18 @@ if (!global.disabledAdapters['moodle']) {
          *         schema:
          *           type: integer
          *         description: Optional context ID where the framework should be created in Moodle (defaults to configuration or 1).
+         *     requestBody:
+         *       content:
+         *         application/json:
+         *           schema:
+         *             type: object
+         *             properties:
+         *               id:
+         *                 type: string
+         *                 description: The 36-character GUID of the CaSS framework to push.
+         *               contextid:
+         *                 type: integer
+         *                 description: Optional context ID in Moodle.
          *     responses:
          *       200:
          *         description: Push result summary
@@ -707,7 +720,6 @@ if (!global.disabledAdapters['moodle']) {
          *     parameters:
          *       - in: query
          *         name: id
-         *         required: true
          *         schema:
          *           type: string
          *         description: The 36-character GUID of the framework to pull.
@@ -716,6 +728,18 @@ if (!global.disabledAdapters['moodle']) {
          *         schema:
          *           type: integer
          *         description: Optional context ID where the framework resides in Moodle (defaults to configuration or 1).
+         *     requestBody:
+         *       content:
+         *         application/json:
+         *           schema:
+         *             type: object
+         *             properties:
+         *               id:
+         *                 type: string
+         *                 description: The 36-character GUID of the framework to pull.
+         *               contextid:
+         *                 type: integer
+         *                 description: Optional context ID in Moodle.
          *     responses:
          *       200:
          *         description: Pull result summary
