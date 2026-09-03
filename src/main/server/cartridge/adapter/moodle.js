@@ -1,6 +1,6 @@
 const loopback = require('../../shims/cassproject.js');
 
-const moodleConfigPaths = ["etc/adapter.moodle.json", "/app/etc/adapter.moodle.json"];
+const moodleConfigPaths = ["etc/adapter.moodle.json"];
 let cachedConfig = null;
 
 function getMoodleConfig() {
